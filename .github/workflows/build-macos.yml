@@ -1,0 +1,85 @@
+name: Build MacOS
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,readwrite"
+  VCPKG_INSTALL_OPTIONS: "--debug"
+
+jobs:
+  build-macos:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-13
+            arch: amd64
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/.act/vcpkg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Mono
+        run: |
+          brew install mono
+
+      - name: Install system dependencies
+        run: |
+          brew install perl bison python3 yasm nasm ninja
+          brew install autoconf autoconf-archive automake libtool pkg-config
+          echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+
+          curl -fsSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+          chmod +x dotnet-install.sh
+          ./dotnet-install.sh --channel 8.0
+          echo "$HOME/.dotnet" >> $GITHUB_PATH
+
+      - name: Install CMake
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: 3.31.1
+
+      - name: Setup vcpkg
+        run: |
+          if [ ! -d "${{ env.VCPKG_ROOT }}" ]; then
+            git clone https://github.com/microsoft/vcpkg.git ${{ env.VCPKG_ROOT }}
+          fi
+
+          ${{ env.VCPKG_ROOT }}/bootstrap-vcpkg.sh
+
+      - name: Add NuGet sources
+        shell: bash
+        run: |
+          mono `${{ env.VCPKG_ROOT }}/vcpkg fetch nuget | tail -n 1` \
+            sources add \
+            -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+            -StorePasswordInClearText \
+            -Name GitHubPackages \
+            -UserName "${{ github.actor }}" \
+            -Password "${{ secrets.NUGET_API_KEY }}"
+          mono `${{ env.VCPKG_ROOT }}/vcpkg fetch nuget | tail -n 1` \
+            setapikey "${{ secrets.NUGET_API_KEY }}" \
+            -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.18
+        with:
+          key: ${{ github.job }}-${{ matrix.arch }}
+
+      - name: Build MacOS
+        run: |
+          cmake --preset="MacOS Release Config" -DENABLE_TESTS=OFF -DBUILD_TOOLS=OFF
+          cmake --build --preset="MacOS Release Build"
+
+      - name: Upload artifacts
+        if: ${{ !env.ACT && success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-binaries
+          path: |
+            out/macos/release/bin/krkr2/**
